@@ -14,6 +14,7 @@ import (
 	"github.com/mshogin/costlint/pkg/counter"
 	"github.com/mshogin/costlint/pkg/daily"
 	"github.com/mshogin/costlint/pkg/feature"
+	"github.com/mshogin/costlint/pkg/forecast"
 	"github.com/mshogin/costlint/pkg/perf"
 	"github.com/mshogin/costlint/pkg/pricing"
 	"github.com/mshogin/costlint/pkg/reporter"
@@ -22,7 +23,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: costlint {count|estimate|compare|subscription|report|budget|ab|cache|perf|track}\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: costlint {count|estimate|compare|subscription|report|budget|ab|cache|perf|track|forecast}\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  count                                              Count tokens from stdin\n")
 		fmt.Fprintf(os.Stderr, "  estimate --model X                                 Estimate cost for model\n")
@@ -41,6 +42,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  track stop --issue N                               Stop tracking and print summary\n")
 		fmt.Fprintf(os.Stderr, "  track status                                       Show active tracking sessions\n")
 		fmt.Fprintf(os.Stderr, "  track report                                       Show all features cost summary\n")
+		fmt.Fprintf(os.Stderr, "  forecast [--branch X] [--base Y] [--model M]       Predict branch cost from git log + telemetry\n")
+		fmt.Fprintf(os.Stderr, "           [--issue N] [--format json|text]\n")
 		os.Exit(1)
 	}
 
@@ -71,6 +74,8 @@ func main() {
 		runDaily()
 	case "track":
 		runTrack()
+	case "forecast":
+		runForecast()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
 		os.Exit(1)
@@ -686,6 +691,77 @@ func runTrack() {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown track sub-command: %s\n", sub)
 		os.Exit(1)
+	}
+}
+
+// runForecast predicts the cost of a git branch by analysing commits and
+// combining the estimated prompt count with historical telemetry averages.
+//
+// Usage:
+//
+//	costlint forecast
+//	costlint forecast --branch feature-x --base main
+//	costlint forecast --model sonnet
+//	costlint forecast --issue 42
+//	costlint forecast --format json
+//	costlint forecast --format text
+func runForecast() {
+	branch := ""
+	base := ""
+	model := ""
+	issueID := ""
+	format := "json"
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--branch":
+			if i+1 < len(args) {
+				i++
+				branch = args[i]
+			}
+		case "--base":
+			if i+1 < len(args) {
+				i++
+				base = args[i]
+			}
+		case "--model":
+			if i+1 < len(args) {
+				i++
+				model = args[i]
+			}
+		case "--issue":
+			if i+1 < len(args) {
+				i++
+				issueID = args[i]
+			}
+		case "--format":
+			if i+1 < len(args) {
+				i++
+				format = args[i]
+			}
+		}
+	}
+
+	opts := forecast.Options{
+		Branch:  branch,
+		Base:    base,
+		Model:   model,
+		IssueID: issueID,
+	}
+
+	f, err := forecast.Calculate(opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	switch format {
+	case "text":
+		fmt.Print(forecast.FormatText(f))
+	default:
+		out, _ := json.MarshalIndent(f, "", "  ")
+		fmt.Println(string(out))
 	}
 }
 
