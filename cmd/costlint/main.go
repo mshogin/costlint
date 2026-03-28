@@ -19,6 +19,7 @@ import (
 	"github.com/mshogin/costlint/pkg/pricing"
 	"github.com/mshogin/costlint/pkg/reporter"
 	"github.com/mshogin/costlint/pkg/telemetry"
+	"github.com/mshogin/costlint/pkg/webhook"
 )
 
 func main() {
@@ -775,6 +776,8 @@ func defaultBudgetPath() string {
 }
 
 // runDaily generates a daily cost report for today from telemetry and budget data.
+// When an anomaly is detected and COSTLINT_WEBHOOK_URL is set, a webhook is fired
+// so another agent can decide to stop, switch model, or alert the owner.
 //
 // Usage:
 //
@@ -795,6 +798,18 @@ func runDaily() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating daily report: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Fire webhook when anomaly is detected.
+	if report.Anomaly {
+		notifier := webhook.NewNotifier(webhook.DefaultConfig())
+		if triggered, werr := notifier.CheckAndNotify(report.TotalCostUSD, report.YesterdayCostUSD); triggered {
+			if werr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: anomaly webhook failed: %v\n", werr)
+			} else if webhook.DefaultConfig().URL != "" {
+				fmt.Fprintf(os.Stderr, "Anomaly webhook sent to %s\n", webhook.DefaultConfig().URL)
+			}
+		}
 	}
 
 	switch format {

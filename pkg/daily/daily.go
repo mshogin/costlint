@@ -20,6 +20,8 @@ type DailyReport struct {
 	Trend            float64            `json:"trend_vs_yesterday_pct"`
 	Anomaly          bool               `json:"anomaly"`
 	AnomalyReason    string             `json:"anomaly_reason,omitempty"`
+	// YesterdayCostUSD is included so callers can use it for webhook threshold checks.
+	YesterdayCostUSD float64            `json:"yesterday_cost_usd,omitempty"`
 }
 
 // BudgetRecord is the shape of the daily-budget.json file used by geniearchi.
@@ -132,6 +134,9 @@ func GenerateReport(telemetryPath string, budgetPath string) (DailyReport, error
 	if yesterdayCost > 0 {
 		report.Trend = ((todayCost - yesterdayCost) / yesterdayCost) * 100
 	}
+
+	// Expose yesterday's cost so callers can use it for webhook checks.
+	report.YesterdayCostUSD = yesterdayCost
 
 	// --- Anomaly detection ---
 	// Flag when today's cost exceeds 2x yesterday's cost.
