@@ -11,6 +11,7 @@ import (
 	"github.com/mshogin/costlint/pkg/ab"
 	"github.com/mshogin/costlint/pkg/budget"
 	"github.com/mshogin/costlint/pkg/cache"
+	contextcost "github.com/mshogin/costlint/pkg/context"
 	"github.com/mshogin/costlint/pkg/counter"
 	"github.com/mshogin/costlint/pkg/daily"
 	"github.com/mshogin/costlint/pkg/feature"
@@ -24,7 +25,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: costlint {count|estimate|compare|subscription|report|budget|ab|cache|perf|track|forecast}\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: costlint {count|estimate|compare|subscription|report|budget|ab|cache|perf|track|forecast|context-cost}\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  count                                              Count tokens from stdin\n")
 		fmt.Fprintf(os.Stderr, "  estimate --model X                                 Estimate cost for model\n")
@@ -45,6 +46,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  track report                                       Show all features cost summary\n")
 		fmt.Fprintf(os.Stderr, "  forecast [--branch X] [--base Y] [--model M]       Predict branch cost from git log + telemetry\n")
 		fmt.Fprintf(os.Stderr, "           [--issue N] [--format json|text]\n")
+		fmt.Fprintf(os.Stderr, "  context-cost <snapshot.yaml>                       Token count + cost estimate for nassau context snapshot\n")
 		os.Exit(1)
 	}
 
@@ -77,6 +79,8 @@ func main() {
 		runTrack()
 	case "forecast":
 		runForecast()
+	case "context-cost":
+		runContextCost()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
 		os.Exit(1)
@@ -764,6 +768,42 @@ func runForecast() {
 		out, _ := json.MarshalIndent(f, "", "  ")
 		fmt.Println(string(out))
 	}
+}
+
+// runContextCost estimates the token cost for a nassau context snapshot YAML file.
+//
+// The snapshot must be in nassau context format:
+//
+//	name: my-context
+//	messages:
+//	  - role: user
+//	    content: "hello"
+//	    tokens: 5        # optional; counted from content if absent
+//	components:
+//	  - name: system_prompt
+//	    content: "You are a helpful assistant."
+//	    tokens: 8
+//
+// Usage:
+//
+//	costlint context-cost snapshot.yaml
+func runContextCost() {
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: costlint context-cost <snapshot.yaml>\n")
+		fmt.Fprintf(os.Stderr, "  Estimate token count and cost for a nassau context snapshot.\n")
+		fmt.Fprintf(os.Stderr, "  Output: JSON with total_tokens and cost_usd per model (haiku/sonnet/opus).\n")
+		os.Exit(1)
+	}
+
+	path := os.Args[2]
+	result, err := contextcost.EstimateFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	out, _ := json.MarshalIndent(result, "", "  ")
+	fmt.Println(string(out))
 }
 
 // defaultBudgetPath returns the path to the geniearchi daily budget JSON.
