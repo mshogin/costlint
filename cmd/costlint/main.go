@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/mshogin/costlint/pkg/ab"
@@ -16,6 +17,7 @@ import (
 	"github.com/mshogin/costlint/pkg/daily"
 	"github.com/mshogin/costlint/pkg/feature"
 	"github.com/mshogin/costlint/pkg/forecast"
+	"github.com/mshogin/costlint/pkg/optimizer"
 	"github.com/mshogin/costlint/pkg/perf"
 	"github.com/mshogin/costlint/pkg/pricing"
 	"github.com/mshogin/costlint/pkg/reporter"
@@ -25,7 +27,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: costlint {count|estimate|compare|subscription|report|budget|ab|cache|perf|track|forecast|context-cost}\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: costlint {count|estimate|compare|subscription|report|budget|ab|cache|perf|track|forecast|context-cost|optimize}\n\n")
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  count                                              Count tokens from stdin\n")
 		fmt.Fprintf(os.Stderr, "  estimate --model X                                 Estimate cost for model\n")
@@ -47,6 +49,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  forecast [--branch X] [--base Y] [--model M]       Predict branch cost from git log + telemetry\n")
 		fmt.Fprintf(os.Stderr, "           [--issue N] [--format json|text]\n")
 		fmt.Fprintf(os.Stderr, "  context-cost <snapshot.yaml>                       Token count + cost estimate for nassau context snapshot\n")
+		fmt.Fprintf(os.Stderr, "  optimize [--config F] [--top N]                    Suggest cost reductions to hit targets in .costlint.yaml\n")
 		os.Exit(1)
 	}
 
@@ -81,6 +84,8 @@ func main() {
 		runForecast()
 	case "context-cost":
 		runContextCost()
+	case "optimize":
+		runOptimize()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmd)
 		os.Exit(1)
@@ -858,5 +863,161 @@ func runDaily() {
 	default:
 		out, _ := json.MarshalIndent(report, "", "  ")
 		fmt.Println(string(out))
+	}
+}
+
+// runOptimize reads workflow definitions from .costlint.yaml and suggests
+// cost-reduction actions ranked by monthly saving impact.
+//
+// Usage:
+//
+//	costlint optimize
+//	costlint optimize --config .costlint.yaml
+//	costlint optimize --top 5
+func runOptimize() {
+	configFile := ""
+	topN := 10
+
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--config":
+			if i+1 < len(args) {
+				i++
+				configFile = args[i]
+			}
+		case "--top":
+			if i+1 < len(args) {
+				i++
+				v, err := strconv.Atoi(args[i])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Invalid --top value: %s\n", args[i])
+					os.Exit(1)
+				}
+				topN = v
+			}
+		}
+	}
+
+	// Resolve config path.
+	cfgPath := configFile
+	if cfgPath == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = "."
+		}
+		cfgPath = filepath.Join(cwd, ".costlint.yaml")
+	}
+
+	cfg, err := optimizer.LoadConfig(cfgPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	targets, err := optimizer.ParseTargets(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Target parse error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if targets.TotalMonthlyCost == nil && targets.MaxPerRequestCost == nil {
+		fmt.Println("No optimize targets configured in .costlint.yaml.")
+		fmt.Println()
+		fmt.Println("Add an 'optimize' section, for example:")
+		fmt.Println()
+		fmt.Println("  optimize:")
+		fmt.Println("    targets:")
+		fmt.Println("      total_monthly_cost: \"<= $100\"")
+		fmt.Println("      max_per_request_cost: \"<= $0.05\"")
+		fmt.Println("    workflows:")
+		fmt.Println("      - name: reports/daily-summary")
+		fmt.Println("        model: sonnet")
+		fmt.Println("        calls_per_month: 3000")
+		fmt.Println("        avg_input_tokens: 500")
+		fmt.Println("        avg_output_tokens: 200")
+		return
+	}
+
+	if len(cfg.Workflows) == 0 {
+		fmt.Println("No workflows defined in the optimize section.")
+		fmt.Println("Add workflow entries to .costlint.yaml to get suggestions.")
+		return
+	}
+
+	workflows := optimizer.WorkflowsFromConfig(cfg.Workflows)
+	baseline := optimizer.ComputeMetrics(workflows)
+
+	// Print current state.
+	fmt.Println("Current:")
+	if targets.TotalMonthlyCost != nil {
+		status := "OK"
+		if !targets.TotalMonthlyCost.Satisfied(baseline.TotalMonthlyCost) {
+			status = fmt.Sprintf("target: %s$%.2f", targets.TotalMonthlyCost.Op, targets.TotalMonthlyCost.Value)
+		}
+		fmt.Printf("  total_monthly_cost:   $%.2f (%s)\n", baseline.TotalMonthlyCost, status)
+	}
+	if targets.MaxPerRequestCost != nil {
+		status := "OK"
+		if !targets.MaxPerRequestCost.Satisfied(baseline.MaxPerRequestCost) {
+			status = fmt.Sprintf("target: %s$%.4f", targets.MaxPerRequestCost.Op, targets.MaxPerRequestCost.Value)
+		}
+		fmt.Printf("  max_per_request_cost: $%.4f (%s)\n", baseline.MaxPerRequestCost, status)
+	}
+	fmt.Println()
+
+	opt := optimizer.New(targets, topN)
+	suggestions := opt.Optimize(workflows)
+
+	if len(suggestions) == 0 {
+		fmt.Println("All targets already satisfied - no suggestions.")
+		return
+	}
+
+	fmt.Printf("Suggestions (ranked by impact):\n\n")
+
+	for i, s := range suggestions {
+		fmt.Printf("%d. %s %s\n", i+1, s.Type, formatSuggestionDetail(s))
+
+		if s.MonthlySaving > 0 {
+			impact := fmt.Sprintf("-$%.2f/month", s.MonthlySaving)
+			if s.LatencyNote != "" {
+				impact += ", " + s.LatencyNote
+			}
+			fmt.Printf("   Impact: %s\n", impact)
+		}
+		fmt.Printf("   Reason: %s\n", s.Reason)
+		fmt.Println()
+	}
+
+	// Summary: total potential saving.
+	if len(suggestions) > 1 {
+		var totalSaving float64
+		for _, s := range suggestions {
+			totalSaving += s.MonthlySaving
+		}
+		projectedTotal := baseline.TotalMonthlyCost - totalSaving
+		if projectedTotal < 0 {
+			projectedTotal = 0
+		}
+		fmt.Printf("Total potential saving if all applied: -$%.2f/month\n", totalSaving)
+		if targets.TotalMonthlyCost != nil {
+			fmt.Printf("Projected total: $%.2f (target: %s$%.2f)\n",
+				projectedTotal, targets.TotalMonthlyCost.Op, targets.TotalMonthlyCost.Value)
+		}
+	}
+}
+
+// formatSuggestionDetail formats a suggestion's workflow and detail for display.
+func formatSuggestionDetail(s optimizer.Suggestion) string {
+	switch s.Type {
+	case optimizer.SuggestionRoute:
+		return fmt.Sprintf("%s (%s)", s.Workflow, s.Detail)
+	case optimizer.SuggestionCache:
+		return fmt.Sprintf("%s (%s)", s.Workflow, s.Detail)
+	case optimizer.SuggestionBatch:
+		return fmt.Sprintf("%s (%s)", s.Workflow, s.Detail)
+	default:
+		return fmt.Sprintf("%s %s", s.Workflow, s.Detail)
 	}
 }
